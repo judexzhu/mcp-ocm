@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables (contains API tokens)
+.env
+
+# REST API file with sensitive data (for development only)
+# Remove this line to include a sanitized version in git
+ocmapi.rest

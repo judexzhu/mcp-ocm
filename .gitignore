@@ -15,3 +15,6 @@ wheels/
 # REST API file with sensitive data (for development only)
 # Remove this line to include a sanitized version in git
 ocmapi.rest
+
+# Claude Code
+CLAUDE.md

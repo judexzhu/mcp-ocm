@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, Optional
 import asyncio
 
@@ -43,191 +44,158 @@ class RedHatAPI:
             self.access_token = token_data["access_token"]
             return self.access_token
     
-    async def get_cluster(self, cluster_id: str) -> Dict[str, Any]:
-        """Get cluster details by cluster ID"""
+    async def resolve_cluster_id(self, cluster_id: str) -> str:
+        """Resolve a cluster identifier to an internal OCM cluster ID.
+        Accepts either an internal ID or an external ID (UUID format) and returns the internal ID."""
+        uuid_pattern = re.compile(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE
+        )
+        if not uuid_pattern.match(cluster_id):
+            return cluster_id
+
         if not self.access_token:
             await self.get_access_token()
-            
+
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}",
+                f"{self.base_url}/api/clusters_mgmt/v1/clusters",
+                params={"search": f"external_id = '{cluster_id}'"},
                 headers={"Authorization": f"Bearer {self.access_token}"}
             )
             response.raise_for_status()
+            data = response.json()
+            items = data.get("items", [])
+            if not items:
+                raise ValueError(f"No cluster found with external_id '{cluster_id}'")
+            return items[0]["id"]
+
+    async def _get(self, path: str, params: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Generic authenticated GET request with automatic token refresh on 401"""
+        if not self.access_token:
+            await self.get_access_token()
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}{path}",
+                params=params,
+                headers={"Authorization": f"Bearer {self.access_token}"}
+            )
+            if response.status_code == 401:
+                await self.get_access_token()
+                response = await client.get(
+                    f"{self.base_url}{path}",
+                    params=params,
+                    headers={"Authorization": f"Bearer {self.access_token}"}
+                )
+            response.raise_for_status()
             return response.json()
+
+    async def search_clusters(self, search: str, page: int = 1, size: int = 10) -> Dict[str, Any]:
+        params = {"search": search, "page": str(page), "size": str(size)}
+        return await self._get("/api/clusters_mgmt/v1/clusters", params=params)
+
+    async def get_cluster(self, cluster_id: str) -> Dict[str, Any]:
+        """Get cluster details by cluster ID (accepts internal or external ID)"""
+        cluster_id = await self.resolve_cluster_id(cluster_id)
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}")
 
     async def get_cluster_machine_pools(self, cluster_id: str, is_hcp: bool) -> Dict[str, Any]:
-        """Get cluster machine pools (Classic) or node pools (HCP)"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        # Choose endpoint based on cluster type
         endpoint = "node_pools" if is_hcp else "machine_pools"
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}/{endpoint}",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/{endpoint}")
 
-    async def get_cluster_service_logs(self, external_id: str) -> Dict[str, Any]:
-        """Get cluster service logs using external_id"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/service_logs/v1/clusters/{external_id}/cluster_logs",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+    async def get_cluster_service_logs(self, external_id: str, page: int = 1, size: int = 50) -> Dict[str, Any]:
+        return await self._get(
+            f"/api/service_logs/v1/clusters/{external_id}/cluster_logs",
+            params={"page": str(page), "size": str(size)}
+        )
 
     async def get_cluster_identity_providers(self, cluster_id: str) -> Dict[str, Any]:
-        """Get cluster identity providers"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}/identity_providers",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/identity_providers")
 
     async def get_cluster_ingress(self, cluster_id: str) -> Dict[str, Any]:
-        """Get cluster ingress configuration"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}/ingresses",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/ingresses")
 
     async def get_cluster_limited_support_reasons(self, cluster_id: str) -> Dict[str, Any]:
-        """Get cluster limited support reasons"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}/limited_support_reasons",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/limited_support_reasons")
 
     async def get_cluster_install_logs(self, cluster_id: str) -> Dict[str, Any]:
-        """Get cluster install logs"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}/logs/install",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/logs/install")
 
     async def get_cluster_alerts(self, cluster_id: str) -> Dict[str, Any]:
-        """Get cluster alerts"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}/metric_queries/alerts",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/metric_queries/alerts")
 
     async def get_cluster_operators(self, cluster_id: str) -> Dict[str, Any]:
-        """Get cluster operators status"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}/metric_queries/cluster_operators",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/metric_queries/cluster_operators")
 
     async def get_cluster_upgrade_policies(self, cluster_id: str) -> Dict[str, Any]:
-        """Get cluster upgrade policies (Classic clusters)"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}/upgrade_policies",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/upgrade_policies")
 
     async def get_cluster_control_plane_upgrade_policies(self, cluster_id: str) -> Dict[str, Any]:
-        """Get cluster control plane upgrade policies (HCP clusters)"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}/control_plane/upgrade_policies",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/control_plane/upgrade_policies")
 
     async def get_node_pool_upgrade_policies(self, cluster_id: str, node_pool_id: str) -> Dict[str, Any]:
-        """Get node pool upgrade policies (HCP clusters)"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}/node_pools/{node_pool_id}/upgrade_policies",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/node_pools/{node_pool_id}/upgrade_policies")
 
     async def get_cluster_vpc(self, cluster_id: str) -> Dict[str, Any]:
-        """Get cluster VPC information"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/clusters_mgmt/v1/clusters/{cluster_id}/vpc",
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/vpc")
 
     async def get_accounts_by_email(self, email: str) -> Dict[str, Any]:
-        """Search for accounts by email address"""
-        if not self.access_token:
-            await self.get_access_token()
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/accounts_mgmt/v1/accounts",
-                params={"search": f"email = '{email}'"},
-                headers={"Authorization": f"Bearer {self.access_token}"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._get("/api/accounts_mgmt/v1/accounts", params={"search": f"email = '{email}'"})
+
+    async def get_cluster_status(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/status")
+
+    async def get_cluster_resources_live(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/resources/live")
+
+    async def get_cluster_uninstall_logs(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/logs/uninstall")
+
+    async def get_cluster_inflight_checks(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/inflight_checks")
+
+
+    async def get_cluster_cpu_metrics(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/metric_queries/cpu_total_by_node_roles_os")
+
+    async def get_cluster_socket_metrics(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/metric_queries/socket_total_by_node_roles_os")
+
+    async def get_cluster_node_metrics(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/metric_queries/nodes")
+
+    async def get_cluster_addons(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/addons")
+
+    async def get_cluster_autoscaler(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/autoscaler")
+
+    async def get_cluster_groups(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/groups")
+
+    async def get_cluster_group_users(self, cluster_id: str, group_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/groups/{group_id}/users")
+
+
+    async def get_cluster_kubelet_configs(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/kubelet_configs")
+
+    async def get_cluster_private_link_config(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/aws/private_link_configuration")
+
+    async def get_cluster_sts_operator_roles(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/sts_operator_roles")
+
+    async def get_cluster_provision_shard(self, cluster_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/clusters_mgmt/v1/clusters/{cluster_id}/provision_shard")
+
+    async def get_subscription(self, subscription_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/accounts_mgmt/v1/subscriptions/{subscription_id}")
+
+    async def get_organization(self, org_id: str) -> Dict[str, Any]:
+        return await self._get(f"/api/accounts_mgmt/v1/organizations/{org_id}")
+
+    async def get_current_account(self) -> Dict[str, Any]:
+        return await self._get("/api/accounts_mgmt/v1/current_account")
 
 # Initialize API client
 rhapi = RedHatAPI()
@@ -250,8 +218,9 @@ async def ocm_get_cluster(cluster_id: str) -> Dict[str, Any]:
         - And other cluster metadata
     """
     try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
         cluster_data = await rhapi.get_cluster(cluster_id)
-        
+
         # Add cluster type determination
         is_hcp = cluster_data.get("hypershift", {}).get("enabled", False)
         cluster_data["cluster_type"] = "HCP" if is_hcp else "Classic"
@@ -262,6 +231,53 @@ async def ocm_get_cluster(cluster_id: str) -> Dict[str, Any]:
         if e.response.status_code == 404:
             return {"error": f"Cluster '{cluster_id}' not found"}
         elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+@mcp.tool()
+async def ocm_search_clusters(search: str, page: int = 1, size: int = 10) -> Dict[str, Any]:
+    """
+    Search for clusters using OCM search syntax.
+
+    Args:
+        search: OCM search query (e.g. "name like 'my-cluster%'", "state = 'ready'",
+                "cloud_provider.id = 'aws' and region.id = 'us-east-1'")
+        page: Page number (default 1)
+        size: Results per page (default 10, max 100)
+
+    Returns:
+        Dictionary containing:
+        - clusters: List of matching clusters (id, name, state, cloud_provider, region, version, cluster_type)
+        - total: Total number of matching clusters
+        - page/size: Pagination info
+    """
+    try:
+        data = await rhapi.search_clusters(search, page, size)
+        clusters = []
+        for c in data.get("items", []):
+            is_hcp = c.get("hypershift", {}).get("enabled", False)
+            clusters.append({
+                "id": c.get("id"),
+                "external_id": c.get("external_id"),
+                "name": c.get("name"),
+                "state": c.get("state"),
+                "cloud_provider": c.get("cloud_provider", {}).get("id"),
+                "region": c.get("region", {}).get("id"),
+                "version": c.get("openshift_version"),
+                "cluster_type": "HCP" if is_hcp else "Classic",
+                "product": c.get("product", {}).get("id"),
+            })
+        return {
+            "clusters": clusters,
+            "total": data.get("total", 0),
+            "page": page,
+            "size": size
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
             return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
         else:
             return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
@@ -284,6 +300,7 @@ async def ocm_get_cluster_machine_pools(cluster_id: str) -> Dict[str, Any]:
         - cluster_info: Basic cluster information
     """
     try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
         # First get cluster info to determine type
         cluster_data = await rhapi.get_cluster(cluster_id)
         is_hcp = cluster_data.get("hypershift", {}).get("enabled", False)
@@ -317,30 +334,34 @@ async def ocm_get_cluster_machine_pools(cluster_id: str) -> Dict[str, Any]:
         return {"error": f"Unexpected error: {str(e)}"}
 
 @mcp.tool()
-async def ocm_get_cluster_service_logs(cluster_id: str) -> Dict[str, Any]:
+async def ocm_get_cluster_service_logs(cluster_id: str, page: int = 1, size: int = 50) -> Dict[str, Any]:
     """
     Get cluster service logs using external_id from cluster data
-    
+
     Args:
-        cluster_id: The cluster ID to retrieve service logs for
-    
+        cluster_id: The cluster ID to retrieve service logs for (internal or external UUID)
+        page: Page number (default 1)
+        size: Results per page (default 50)
+
     Returns:
         Dictionary containing:
         - cluster_info: Basic cluster information
         - logs: List of service log entries
         - total_logs: Total number of log entries
+        - page/size: Pagination info
     """
     try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
         # First get cluster info to get external_id
         cluster_data = await rhapi.get_cluster(cluster_id)
         external_id = cluster_data.get("external_id")
-        
+
         if not external_id:
             return {"error": "Cluster external_id not found"}
-        
-        # Get service logs using external_id
-        logs_data = await rhapi.get_cluster_service_logs(external_id)
-        
+
+        # Get service logs using external_id (UUID)
+        logs_data = await rhapi.get_cluster_service_logs(external_id, page, size)
+
         return {
             "cluster_info": {
                 "id": cluster_data.get("id"),
@@ -349,9 +370,11 @@ async def ocm_get_cluster_service_logs(cluster_id: str) -> Dict[str, Any]:
                 "state": cluster_data.get("state")
             },
             "logs": logs_data.get("items", []),
-            "total_logs": logs_data.get("total", 0)
+            "total_logs": logs_data.get("total", 0),
+            "page": page,
+            "size": size
         }
-        
+
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return {"error": f"Cluster '{cluster_id}' or service logs not found"}
@@ -377,6 +400,7 @@ async def ocm_get_cluster_identity_providers(cluster_id: str) -> Dict[str, Any]:
         - total_providers: Total number of identity providers
     """
     try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
         # Get cluster info and identity providers in parallel
         cluster_data, idp_data = await asyncio.gather(
             rhapi.get_cluster(cluster_id),
@@ -419,6 +443,7 @@ async def ocm_get_cluster_ingress(cluster_id: str) -> Dict[str, Any]:
         - total_ingress: Total number of ingress configurations
     """
     try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
         # Get cluster info and ingress config in parallel
         cluster_data, ingress_data = await asyncio.gather(
             rhapi.get_cluster(cluster_id),
@@ -461,6 +486,7 @@ async def ocm_get_cluster_limited_support_reasons(cluster_id: str) -> Dict[str, 
         - total_reasons: Total number of limited support reasons
     """
     try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
         # Get cluster info and limited support reasons in parallel
         cluster_data, reasons_data = await asyncio.gather(
             rhapi.get_cluster(cluster_id),
@@ -503,6 +529,7 @@ async def ocm_get_cluster_install_logs(cluster_id: str) -> Dict[str, Any]:
         - log_content: Raw log content if available
     """
     try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
         # Get cluster info and install logs in parallel
         cluster_data, logs_data = await asyncio.gather(
             rhapi.get_cluster(cluster_id),
@@ -546,6 +573,7 @@ async def ocm_get_cluster_alerts(cluster_id: str) -> Dict[str, Any]:
         - total_alerts: Total number of alerts
     """
     try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
         # Get cluster info and alerts in parallel
         cluster_data, alerts_data = await asyncio.gather(
             rhapi.get_cluster(cluster_id),
@@ -590,6 +618,7 @@ async def ocm_get_cluster_operators(cluster_id: str) -> Dict[str, Any]:
         - total_operators: Total number of operators
     """
     try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
         # Get cluster info and operators in parallel
         cluster_data, operators_data = await asyncio.gather(
             rhapi.get_cluster(cluster_id),
@@ -635,11 +664,12 @@ async def ocm_get_cluster_upgrade_policies(cluster_id: str) -> Dict[str, Any]:
         - total_policies: Total number of upgrade policies found
     """
     try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
         # First get cluster info to determine type
         cluster_data = await rhapi.get_cluster(cluster_id)
         is_hcp = cluster_data.get("hypershift", {}).get("enabled", False)
         cluster_type = "HCP" if is_hcp else "Classic"
-        
+
         result = {
             "cluster_info": {
                 "id": cluster_data.get("id"),
@@ -736,6 +766,7 @@ async def ocm_get_cluster_vpc(cluster_id: str) -> Dict[str, Any]:
         - subnet_summary: Summary of public vs private subnets
     """
     try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
         # Get cluster info and VPC info in parallel
         cluster_data, vpc_data = await asyncio.gather(
             rhapi.get_cluster(cluster_id),
@@ -814,6 +845,577 @@ async def ocm_get_accounts_by_email(email: str) -> Dict[str, Any]:
             return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
+
+@mcp.tool()
+async def ocm_get_cluster_status(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get cluster status (DNS readiness, provisioning state, health)
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, status_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_status(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "status": status_data
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_resources(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get currently available cluster resources (CPU, memory)
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, resources_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_resources_live(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "resources": resources_data
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_uninstall_logs(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get cluster uninstall logs
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, logs_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_uninstall_logs(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "uninstall_logs": logs_data.get("content", ""),
+            "log_size": len(logs_data.get("content", "")),
+            "has_logs": bool(logs_data.get("content"))
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' or uninstall logs not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_inflight_checks(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get cluster inflight checks (useful for debugging provisioning issues)
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, checks_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_inflight_checks(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "inflight_checks": checks_data.get("items", []),
+            "total_checks": checks_data.get("total", 0)
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_cpu_metrics(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get cluster CPU metrics broken down by node roles and OS
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, metrics_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_cpu_metrics(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "cpu_metrics": metrics_data
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_socket_metrics(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get cluster socket metrics broken down by node roles and OS
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, metrics_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_socket_metrics(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "socket_metrics": metrics_data
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_node_metrics(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get cluster node metrics
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, metrics_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_node_metrics(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "node_metrics": metrics_data
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_addons(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get installed add-ons for a cluster
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, addons_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_addons(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "addons": addons_data.get("items", []),
+            "total_addons": addons_data.get("total", 0)
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_autoscaler(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get cluster autoscaler configuration
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, autoscaler_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_autoscaler(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "autoscaler": autoscaler_data
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' or autoscaler not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_groups(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get cluster RBAC groups and their users
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, groups_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_groups(cluster_id)
+        )
+
+        groups = groups_data.get("items", [])
+
+        # Fetch users for each group in parallel
+        if groups:
+            user_tasks = []
+            for group in groups:
+                group_id = group.get("id")
+                if group_id:
+                    user_tasks.append((group_id, rhapi.get_cluster_group_users(cluster_id, group_id)))
+
+            if user_tasks:
+                user_results = await asyncio.gather(
+                    *[task for _, task in user_tasks],
+                    return_exceptions=True
+                )
+                for i, (group_id, _) in enumerate(user_tasks):
+                    result = user_results[i]
+                    if isinstance(result, Exception):
+                        for g in groups:
+                            if g.get("id") == group_id:
+                                g["users"] = {"error": str(result)}
+                    else:
+                        for g in groups:
+                            if g.get("id") == group_id:
+                                g["users"] = result.get("items", [])
+
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "groups": groups,
+            "total_groups": groups_data.get("total", 0)
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_kubelet_configs(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get cluster kubelet configurations
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, kubelet_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_kubelet_configs(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "kubelet_configs": kubelet_data.get("items", []),
+            "total_configs": kubelet_data.get("total", 0)
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_private_link(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get AWS Private Link configuration for a cluster
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, pl_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_private_link_config(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "private_link_configuration": pl_data
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' or Private Link config not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_sts_operator_roles(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get STS operator IAM roles for a cluster
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, roles_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_sts_operator_roles(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "sts_operator_roles": roles_data.get("items", []),
+            "total_roles": roles_data.get("total", 0)
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_cluster_provision_shard(cluster_id: str) -> Dict[str, Any]:
+    """
+    Get the provision shard that manages a cluster
+
+    Args:
+        cluster_id: The cluster ID (internal or external UUID)
+    """
+    try:
+        cluster_id = await rhapi.resolve_cluster_id(cluster_id)
+        cluster_data, shard_data = await asyncio.gather(
+            rhapi.get_cluster(cluster_id),
+            rhapi.get_cluster_provision_shard(cluster_id)
+        )
+        return {
+            "cluster_info": {
+                "id": cluster_data.get("id"),
+                "external_id": cluster_data.get("external_id"),
+                "name": cluster_data.get("name"),
+                "state": cluster_data.get("state")
+            },
+            "provision_shard": shard_data
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Cluster '{cluster_id}' or provision shard not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_subscription(subscription_id: str) -> Dict[str, Any]:
+    """
+    Get subscription details by subscription ID
+
+    Args:
+        subscription_id: The subscription ID to retrieve
+    """
+    try:
+        subscription_data = await rhapi.get_subscription(subscription_id)
+        return {"subscription": subscription_data}
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Subscription '{subscription_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_organization(org_id: str) -> Dict[str, Any]:
+    """
+    Get organization details by organization ID
+
+    Args:
+        org_id: The organization ID to retrieve
+    """
+    try:
+        org_data = await rhapi.get_organization(org_id)
+        return {"organization": org_data}
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Organization '{org_id}' not found"}
+        elif e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+async def ocm_get_current_account() -> Dict[str, Any]:
+    """
+    Get the currently authenticated user's account information
+    """
+    try:
+        account_data = await rhapi.get_current_account()
+        return {"current_account": account_data}
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            return {"error": "Authentication failed - check RH_API_OFFLINE_TOKEN"}
+        else:
+            return {"error": f"API error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
